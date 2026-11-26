@@ -142,7 +142,7 @@ class LANChatApp:
         else:
             size_str = f"{size} B"
 
-        text = f"📁 Đã nhận file: {saved_path.name} ({size_str})\nLưu tại: {saved_path}"
+        text = f"📁 Đã gửi file: {saved_path.name}"
         is_unread = (key != self.current_peer_key)
         self.chats.add(key, "in", text, unread= is_unread)
         count = self.chats.unread_count(key)
@@ -200,12 +200,13 @@ class LANChatApp:
             if connection is None:
                 return False, "Không thể kết nối"
             self.current_peer_key = connection.key
-            self.chats.clear_unread(connection.key)
-            # [THÊM] Khi user bấm mở khung chat -> gửi SEEN_MARKER báo cho đối phương biết đã xem tin
-            try:
-                connection.send_message(SEEN_MARKER)
-            except OSError:
-                pass
+            unread = self.chats.clear_unread(connection.key)
+            # [SỬA] Chỉ gửi báo "Đã xem" khi thực sự có tin nhắn chưa đọc
+            if unread > 0:
+                try:
+                    connection.send_message(SEEN_MARKER)
+                except OSError:
+                    pass
             return True, self.chats.history(connection.key)
         except (OSError, ValueError) as exc:
             return False, str(exc)

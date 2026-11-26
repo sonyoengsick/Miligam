@@ -281,7 +281,8 @@ class MessageBubbleWidget(QWidget):
 
         self.msg_lbl = QLabel(text)
         self.msg_lbl.setFont(QFont(FONT_FAMILY, 12))
-        self.msg_lbl.setWordWrap(True)
+        need_wrap = self.msg_lbl.fontMetrics().horizontalAdvance(text) > 460 or "\n" in text
+        self.msg_lbl.setWordWrap(need_wrap)
         self.msg_lbl.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
         self.msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         b_layout.addWidget(self.msg_lbl)
@@ -855,7 +856,7 @@ class LanChatUI(QMainWindow):
 
     # [SỬA] Thay icon avatar nhỏ bằng dòng chữ "✓ Đã xem" gọn gàng ở dưới bong bóng tin nhắn
     def _on_peer_seen_ui(self, peer_key, peer_name: str):
-        if peer_key != self.current_peer_key:
+        if peer_key != self.current_peer_key or self.msg_layout.count() == 0:
             return
         self._remove_seen_indicator()
 
