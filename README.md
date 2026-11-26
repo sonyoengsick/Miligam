@@ -410,4 +410,5 @@ Hướng nâng cấp:
 
 **Lưu ý trước khi nộp:** hãy chạy kiểm thử trên ít nhất hai máy thật cùng LAN, chụp ảnh Wireshark, xác nhận mọi lệnh và tình huống lỗi. README này mô tả thiết kế và cách chạy của mã nguồn; báo cáo kết quả thực nghiệm nên dùng ảnh/log do chính nhóm tạo ra.
 #   M i l i g a m  
+ #   M i l i g a m  
  
