@@ -49,7 +49,7 @@ def load_crisp_pixmap(path: Path, size: int) -> QPixmap:
     return pix
 
 
-def apply_shadow(widget: QWidget, blur=20, y_offset=4, alpha=40):
+def apply_shadow(widget: QWidget, blur=30, y_offset=4, alpha=50):
     shadow = QGraphicsDropShadowEffect(widget)
     shadow.setBlurRadius(blur)
     shadow.setXOffset(0)
@@ -158,7 +158,7 @@ class AvatarWidget(QLabel):
 
 
 class ChatListItemWidget(QWidget):
-    """Item người đang online giống Zalo / Telegram."""
+    """Item người đang online/offline giống Zalo / Telegram."""
     def __init__(self, name, subtitle, time_str):
         super().__init__()
         self.name = name
@@ -210,6 +210,9 @@ class ChatListItemWidget(QWidget):
         text_layout.addLayout(top_row)
         text_layout.addLayout(bottom_row)
         layout.addLayout(text_layout)
+
+    def set_online(self, is_online: bool):
+        self.avatar.set_avatar(self.name, size=44, online_dot=is_online)
 
     def set_unread(self, count: int):
         if count > 0:
@@ -272,12 +275,12 @@ class MessageBubbleWidget(QWidget):
         b_layout.setContentsMargins(14, 9, 14, 7)
         b_layout.setSpacing(3)
 
-        msg_lbl = QLabel(text)
-        msg_lbl.setFont(QFont(FONT_FAMILY, 12))
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
-        msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        b_layout.addWidget(msg_lbl)
+        self.msg_lbl = QLabel(text)
+        self.msg_lbl.setFont(QFont(FONT_FAMILY, 12))
+        self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
+        self.msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        b_layout.addWidget(self.msg_lbl)
 
         check = " ✓✓" if is_me else ""
         time_lbl = QLabel(f"{time_str}{check}")
@@ -293,12 +296,17 @@ class MessageBubbleWidget(QWidget):
             outer.addWidget(bubble)
             outer.addStretch()
 
+    def set_text(self, text: str):
+        self.msg_lbl.setText(text)
+
 
 class LanChatUI(QMainWindow):
     sig_peer_event = pyqtSignal(str, dict)
     sig_message_received = pyqtSignal(object, str, str, int)
     sig_connection_closed = pyqtSignal(object, str)
     sig_status_notice = pyqtSignal(str)
+    sig_file_sent = pyqtSignal(object, str, bool, str)
+    sig_peer_seen = pyqtSignal(object, str)
 
     def __init__(self, app_controller):
         super().__init__()
@@ -308,7 +316,9 @@ class LanChatUI(QMainWindow):
         self.setFont(QFont(FONT_FAMILY, 10))
 
         self.current_peer_key = None
-        self.peer_items = {}
+        self.peer_items = {}  # {key: (QListWidgetItem, ChatListItemWidget, peer_dict)}
+        self.pending_file_bubbles = {}  # {(peer_key, file_name): MessageBubbleWidget}
+        self.seen_widget = None
 
         self._init_ui()
         self._connect_signals()
@@ -323,16 +333,16 @@ class LanChatUI(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # ================= TOP HEADER (#3eb8ff) =================
+        # ================= TOP HEADER (GRADIENT #38b6ff -> #0349a6) =================
         top_bar = QFrame()
         top_bar.setFixedHeight(74)
         top_bar.setStyleSheet("""
             QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3eb8ff, stop:1 #1e9cf5);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #38b6ff, stop:1 #0349a6);
                 border: none;
             }
         """)
-        apply_shadow(top_bar, blur=18, y_offset=3, alpha=45)
+        apply_shadow(top_bar, blur=24, y_offset=5, alpha=70)
 
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(24, 6, 24, 6)
@@ -352,7 +362,7 @@ class LanChatUI(QMainWindow):
 
         top_layout.addStretch()
 
-        # Thẻ Profile user góc trên bên phải (chỉ đúng 1 khung duy nhất)
+        # Thẻ Profile user góc trên bên phải
         profile_pill = QFrame()
         profile_pill.setObjectName("profilePill")
         profile_pill.setFixedHeight(48)
@@ -380,29 +390,28 @@ class LanChatUI(QMainWindow):
         top_layout.addWidget(profile_pill)
         root_layout.addWidget(top_bar)
 
-        # ================= BODY (2 KHUNG BO TRÒN TO HƠN & ĐỔ BÓNG) =================
+        # ================= BODY (2 KHUNG GỌN HƠN + BÓNG ĐỔ RỘNG & RÕ) =================
         body = QWidget()
         body.setStyleSheet("background-color: #e2e2e2;")
         body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(14, 14, 14, 14)
-        body_layout.setSpacing(14)
+        body_layout.setContentsMargins(26, 24, 26, 26)
+        body_layout.setSpacing(22)
 
         # ---------- KHUNG TRÁI: TIÊU ĐỀ + SEARCH + ONLINE LIST ----------
         left_card = QFrame()
-        left_card.setFixedWidth(340)
+        left_card.setFixedWidth(315)
         left_card.setStyleSheet("""
             QFrame {
                 background-color: #FFFFFF;
                 border-radius: 22px;
             }
         """)
-        apply_shadow(left_card, blur=24, y_offset=6, alpha=45)
+        apply_shadow(left_card, blur=36, y_offset=8, alpha=80)
 
         left_layout = QVBoxLayout(left_card)
         left_layout.setContentsMargins(16, 16, 16, 14)
         left_layout.setSpacing(12)
 
-        # Tiêu đề + số người online
         list_header = QHBoxLayout()
         title_lbl = QLabel("Tin nhắn")
         title_lbl.setFont(QFont(FONT_FAMILY, 14, QFont.Weight.Bold))
@@ -421,7 +430,6 @@ class LanChatUI(QMainWindow):
         list_header.addWidget(self.online_count_lbl)
         left_layout.addLayout(list_header)
 
-        # Thanh Search (#eeecec) với icon find.png sắc nét
         search_box = QFrame()
         search_box.setFixedHeight(44)
         search_box.setStyleSheet("""
@@ -452,7 +460,6 @@ class LanChatUI(QMainWindow):
         sb_layout.addWidget(self.search_input)
         left_layout.addWidget(search_box)
 
-        # Danh sách user online
         self.user_list = QListWidget()
         self.user_list.setStyleSheet("""
             QListWidget {
@@ -485,7 +492,7 @@ class LanChatUI(QMainWindow):
                 border-radius: 22px;
             }
         """)
-        apply_shadow(right_card, blur=24, y_offset=6, alpha=45)
+        apply_shadow(right_card, blur=36, y_offset=8, alpha=80)
 
         right_outer = QVBoxLayout(right_card)
         right_outer.setContentsMargins(0, 0, 0, 0)
@@ -493,14 +500,14 @@ class LanChatUI(QMainWindow):
         self.right_stack = QStackedWidget()
         right_outer.addWidget(self.right_stack)
 
-        # Trang 0: Màn hình chào mừng khi chưa chọn ai
+        # Trang 0: Màn hình chào mừng
         welcome_page = QWidget()
         welcome_page.setStyleSheet("background: transparent;")
         w_layout = QVBoxLayout(welcome_page)
         w_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         w_layout.setSpacing(10)
 
-        w_icon = QLabel("💬")
+        w_icon = QLabel("🤏")
         w_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         w_icon.setStyleSheet("font-size: 52px; background: transparent;")
         w_title = QLabel(f"Xin chào, {self.app.config.username}!")
@@ -524,7 +531,6 @@ class LanChatUI(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
 
-        # Header người đang nhắn
         chat_header = QWidget()
         chat_header.setFixedHeight(68)
         chat_header.setStyleSheet("background: transparent;")
@@ -552,13 +558,11 @@ class LanChatUI(QMainWindow):
 
         right_layout.addWidget(chat_header)
 
-        # Line chia cắt trên (#eeecec)
         top_line = QFrame()
         top_line.setFixedHeight(2)
         top_line.setStyleSheet("background-color: #eeecec; border: none;")
         right_layout.addWidget(top_line)
 
-        # Khu vực tin nhắn ở giữa
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("border: none; background-color: #F5F7FA;")
@@ -574,13 +578,11 @@ class LanChatUI(QMainWindow):
 
         right_layout.addWidget(self.scroll_area)
 
-        # Line chia cắt dưới (#eeecec)
         bottom_line = QFrame()
         bottom_line.setFixedHeight(2)
         bottom_line.setStyleSheet("background-color: #eeecec; border: none;")
         right_layout.addWidget(bottom_line)
 
-        # Khung nhập tin nhắn bo tròn dạng pill + file.png + send.png
         input_bar = QWidget()
         input_bar.setFixedHeight(68)
         input_bar.setStyleSheet("background: transparent;")
@@ -659,25 +661,53 @@ class LanChatUI(QMainWindow):
         self.sig_message_received.connect(self._on_message_received_ui)
         self.sig_connection_closed.connect(self._on_connection_closed_ui)
         self.sig_status_notice.connect(self._on_status_notice_ui)
+        self.sig_file_sent.connect(self._on_file_sent_ui)
+        self.sig_peer_seen.connect(self._on_peer_seen_ui)
 
     def _load_initial_peers(self):
         for peer in self.app.peers.snapshot():
             self._on_peer_event_ui("online", peer)
 
     def _update_online_count(self):
-        self.online_count_lbl.setText(f"Online: {len(self.peer_items)}")
+        count = sum(1 for _, _, p in self.peer_items.values() if p.get("online", True))
+        self.online_count_lbl.setText(f"Online: {count}")
 
     # ================= SLOTS CẬP NHẬT GIAO DIỆN =================
     def _on_peer_event_ui(self, event: str, peer: dict):
+        peer = dict(peer)
         key = (peer["ip"], peer["tcp_port"])
         now_str = datetime.now().strftime("%H:%M")
 
         if event == "online":
+            peer["online"] = True
+
+            # Nếu user cũ vừa đăng nhập lại với cùng tên (kể cả đổi port), tái sử dụng ô cũ trong list
+            if key not in self.peer_items:
+                for old_key, (old_item, old_widget, old_peer) in list(self.peer_items.items()):
+                    if not old_peer.get("online", True) and old_peer["name"].casefold() == peer["name"].casefold():
+                        self.peer_items.pop(old_key)
+                        self.peer_items[key] = (old_item, old_widget, peer)
+                        if self.current_peer_key == old_key:
+                            self.current_peer_key = key
+                        break
+
             if key in self.peer_items:
                 item, widget, _ = self.peer_items[key]
+                widget.name = peer["name"]
                 widget.name_label.setText(peer["name"])
+                widget.set_online(True)
+                widget.msg_label.setText(f"Đang hoạt động • {peer['ip']}")
                 widget.time_label.setText(now_str)
                 self.peer_items[key] = (item, widget, peer)
+
+                # Nếu đang mở sẵn khung chat với người này thì tự nối lại TCP luôn
+                if self.current_peer_key == key:
+                    self.header_avatar.set_avatar(peer["name"], size=44, online_dot=True)
+                    ok, _ = self.app.select_peer_from_ui(peer)
+                    if ok:
+                        self.header_status.setText(f"● Đang hoạt động • {peer['ip']}:{peer['tcp_port']}")
+                        self.header_status.setStyleSheet("color: #10B981; background: transparent;")
+                self._update_online_count()
                 return
 
             item = QListWidgetItem(self.user_list)
@@ -690,14 +720,18 @@ class LanChatUI(QMainWindow):
 
         elif event == "offline":
             if key in self.peer_items:
-                item, _, _ = self.peer_items.pop(key)
-                row = self.user_list.row(item)
-                self.user_list.takeItem(row)
+                item, widget, old_peer = self.peer_items[key]
+                old_peer["online"] = False
+                widget.set_online(False)
+                widget.msg_label.setText("Đã ngắt kết nối")
+                widget.time_label.setText(now_str)
                 self._update_online_count()
+
+                # Giữ nguyên khung chat và tin nhắn, chỉ báo đã ngắt kết nối
                 if self.current_peer_key == key:
-                    self.current_peer_key = None
-                    self.header_status.setText("Đã ngoại tuyến")
-                    self.header_status.setStyleSheet("color: #9CA3AF; background: transparent;")
+                    self.header_avatar.set_avatar(old_peer["name"], size=44, online_dot=False)
+                    self.header_status.setText("● Đã ngắt kết nối")
+                    self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
 
     def _on_message_received_ui(self, peer_key, sender_name: str, text: str, unread_count: int):
         now_str = datetime.now().strftime("%H:%M")
@@ -712,11 +746,51 @@ class LanChatUI(QMainWindow):
 
     def _on_connection_closed_ui(self, peer_key, reason: str):
         if peer_key == self.current_peer_key:
-            self.header_status.setText(f"Đã ngắt kết nối ({reason})")
+            self.header_status.setText("● Đã ngắt kết nối")
             self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
 
     def _on_status_notice_ui(self, text: str):
         self.header_status.setText(text)
+
+    def _on_file_sent_ui(self, peer_key, file_name: str, success: bool, err: str):
+        bubble = self.pending_file_bubbles.pop((peer_key, file_name), None)
+        if success:
+            if bubble:
+                bubble.set_text(f"✅ Đã gửi file: {file_name}")
+            if peer_key in self.peer_items:
+                _, widget, _ = self.peer_items[peer_key]
+                widget.msg_label.setText(f"Bạn: Đã gửi {file_name}")
+        else:
+            if bubble:
+                bubble.set_text(f"❌ Gửi file lỗi ({file_name}): {err}")
+
+    def _remove_seen_indicator(self):
+        if self.seen_widget is not None:
+            self.msg_layout.removeWidget(self.seen_widget)
+            self.seen_widget.deleteLater()
+            self.seen_widget = None
+
+    def _on_peer_seen_ui(self, peer_key, peer_name: str):
+        if peer_key != self.current_peer_key:
+            return
+        self._remove_seen_indicator()
+
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        r_layout = QHBoxLayout(row)
+        r_layout.setContentsMargins(18, 0, 20, 4)
+        r_layout.addStretch()
+
+        seen_av = AvatarWidget(peer_name, size=18, online_dot=False)
+        seen_av.setToolTip(f"{peer_name} đã xem")
+        r_layout.addWidget(seen_av)
+
+        self.seen_widget = row
+        self.msg_layout.addWidget(row)
+        QApplication.processEvents()
+        self.scroll_area.verticalScrollBar().setValue(
+            self.scroll_area.verticalScrollBar().maximum()
+        )
 
     # ================= TƯƠNG TÁC NGƯỜI DÙNG =================
     def _handle_user_click(self, clicked_item):
@@ -726,8 +800,17 @@ class LanChatUI(QMainWindow):
             if is_sel:
                 self.current_peer_key = key
                 self.right_stack.setCurrentIndex(1)
-                self.header_avatar.set_avatar(peer["name"], size=42, online_dot=True)
+                is_online = peer.get("online", True)
+                self.header_avatar.set_avatar(peer["name"], size=44, online_dot=is_online)
                 self.header_name.setText(peer["name"])
+
+                if not is_online:
+                    self.header_status.setText("● Đã ngắt kết nối")
+                    self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
+                    widget.set_unread(0)
+                    self._render_history(peer["name"], self.app.chats.history(key))
+                    return
+
                 self.header_status.setText(f"Đang kết nối tới {peer['ip']}:{peer['tcp_port']}...")
                 self.header_status.setStyleSheet("color: #6B7280; background: transparent;")
 
@@ -746,9 +829,24 @@ class LanChatUI(QMainWindow):
         text = self.msg_input.text().strip()
         if not text or self.current_peer_key is None:
             return
-        self.msg_input.clear()
 
+        if self.current_peer_key in self.peer_items:
+            _, _, peer = self.peer_items[self.current_peer_key]
+            if not peer.get("online", True):
+                self.header_status.setText("● Người này đã ngắt kết nối, chờ họ online lại để gửi")
+                self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
+                return
+
+        self.msg_input.clear()
         ok, err = self.app.send_message_from_ui(self.current_peer_key, text)
+
+        # Nếu vừa online lại mà socket chưa kịp nối thì tự nối lại rồi gửi luôn
+        if not ok and self.current_peer_key in self.peer_items:
+            _, _, peer = self.peer_items[self.current_peer_key]
+            reconn_ok, _ = self.app.select_peer_from_ui(peer)
+            if reconn_ok:
+                ok, err = self.app.send_message_from_ui(self.current_peer_key, text)
+
         if ok:
             now_str = datetime.now().strftime("%H:%M")
             self._append_message(self.app.config.username, text, is_me=True, time_str=now_str)
@@ -762,10 +860,16 @@ class LanChatUI(QMainWindow):
     def _handle_attach_file(self):
         if self.current_peer_key is None:
             return
+        if self.current_peer_key in self.peer_items:
+            _, _, peer = self.peer_items[self.current_peer_key]
+            if not peer.get("online", True):
+                self.header_status.setText("● Người này đã ngắt kết nối, ko thể gửi file")
+                return
         file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file để gửi")
         if file_path:
-            file_name = file_path.split("/")[-1].split("\\")[-1]
-            self._append_message(self.app.config.username, f"📁 Đang gửi file: {file_name}", is_me=True)
+            file_name = Path(file_path).name
+            bubble = self._append_message(self.app.config.username, f"⏳ Đang gửi file: {file_name}", is_me=True)
+            self.pending_file_bubbles[(self.current_peer_key, file_name)] = bubble
             self.app.send_file_from_ui(self.current_peer_key, file_path)
 
     def _filter_users(self, keyword: str):
@@ -781,6 +885,7 @@ class LanChatUI(QMainWindow):
             self._append_message(sender, text, is_me=is_me, time_str="")
 
     def _append_message(self, sender: str, text: str, is_me=False, time_str=""):
+        self._remove_seen_indicator()
         if time_str == "":
             time_str = datetime.now().strftime("%H:%M")
         msg_w = MessageBubbleWidget(sender, text, time_str, is_me)
@@ -789,8 +894,10 @@ class LanChatUI(QMainWindow):
         self.scroll_area.verticalScrollBar().setValue(
             self.scroll_area.verticalScrollBar().maximum()
         )
+        return msg_w
 
     def _clear_messages(self):
+        self.seen_widget = None
         while self.msg_layout.count():
             child = self.msg_layout.takeAt(0)
             if child.widget():

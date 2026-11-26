@@ -16,6 +16,8 @@ from .peer_manager import PeerManager
 from .protocol import send_frame
 from .tcp_server import TCPServer
 
+SEEN_MARKER = "\x00SEEN\x00"
+
 # Hàm xác định địa chỉ IPv4 của máy khi ra mạng
 def detect_local_ip() -> str:
     """Tìm địa chỉ IPv4 nguồn dùng cho route mặc định mà không cần gửi dữ liệu."""
@@ -102,6 +104,12 @@ class LANChatApp:
     # hàm xử lí callback _on_message
     def _on_message(self, connection: PeerConnection, message: str):
         key = connection.key
+        # Bắt tín hiệu "Đã xem" từ máy bên kia, ko lưu vào lịch sử chat
+        if message == SEEN_MARKER:
+            if self.ui:
+                self.ui.sig_peer_seen.emit(key, connection.peer["name"])
+            return
+
         is_unread = (key != self.current_peer_key)
         self.chats.add(key, "in", message, unread= is_unread) # thêm lịch sử trò chuyện
         count = self.chats.unread_count(key)
@@ -109,6 +117,10 @@ class LANChatApp:
             self.ui.sig_message_received.emit(key, connection.peer["name"], message, count)
         if not is_unread: # tin nhắn từ người đang chat chung
             self.say(f"[{connection.peer['name']}] {message}")
+            try:
+                connection.send_message(SEEN_MARKER)
+            except OSError:
+                pass
         else: # tin nhắn đến từ người khác
             self.say(f"[*] New message from {connection.peer['name']} ({count} unread)")
 
@@ -154,6 +166,11 @@ class LANChatApp:
                 return False, "Không thể kết nối"
             self.current_peer_key = connection.key
             self.chats.clear_unread(connection.key)
+            # Báo cho máy bên kia biết mình vừa mở xem tin nhắn
+            try:
+                connection.send_message(SEEN_MARKER)
+            except OSError:
+                pass
             return True, self.chats.history(connection.key)
         except (OSError, ValueError) as exc:
             return False, str(exc)
@@ -174,11 +191,19 @@ class LANChatApp:
         if not connection:
             return
         peer = connection.peer
+        file_name = Path(file_path).name
+
         def _worker():
-            from .file_transfer import FileTransfer
-            FileTransfer(self.config, self.local_ip, self.say).send(peer, file_path)
-            if self.ui:
-                self.ui.sig_status_notice.emit(f"Đã gửi xong file tới {peer['name']}")
+            try:
+                from .file_transfer import FileTransfer
+                FileTransfer(self.config, self.local_ip, self.say).send(peer, file_path)
+                self.chats.add(peer_key, "out", f"✅ Đã gửi file: {file_name}")
+                if self.ui:
+                    self.ui.sig_file_sent.emit(peer_key, file_name, True, "")
+            except Exception as exc:
+                if self.ui:
+                    self.ui.sig_file_sent.emit(peer_key, file_name, False, str(exc))
+
         threading.Thread(target=_worker, daemon=True).start()
 
     # hàm xử lí input
