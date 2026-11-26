@@ -1,6 +1,7 @@
 #import thư viện chuẩn
 import argparse
 import socket
+import sys
 import threading
 from pathlib import Path
 #import thư viện hỗ trợ giao diện
@@ -14,6 +15,7 @@ from .discovery import DiscoveryService
 from .peer_manager import PeerManager
 from .protocol import send_frame
 from .tcp_server import TCPServer
+
 # Hàm xác định địa chỉ IPv4 của máy khi ra mạng
 def detect_local_ip() -> str:
     """Tìm địa chỉ IPv4 nguồn dùng cho route mặc định mà không cần gửi dữ liệu."""
@@ -25,6 +27,7 @@ def detect_local_ip() -> str:
         return "127.0.0.1" # loopback
     finally:
         probe.close()
+
 # tạo lớp quản lí chính, giao tiếp với user
 class LANChatApp:
     def __init__(self, config: Config):
@@ -35,14 +38,17 @@ class LANChatApp:
         self.connections = ConnectionManager()
         self.chats = ChatManager()
         self.current_peer_key = None
+        self.ui = None # giữ tham chiếu tới cửa sổ GUI
         self._screen_lock = threading.Lock()
         self._stop = threading.Event()
         self.discovery = DiscoveryService(config, self.peers, self.local_ip, self._on_peer_event, self.say)
         self.tcp_server = TCPServer(config, self.local_ip, self.connections, self._on_message, self._on_connection_closed, self.say)
+
     # hàm in ra tin nhắn ngay lập tức
     def say(self, message: str):
         with self._screen_lock:
             print(message, flush= True)
+
     # hàm khởi chạy app
     def start(self):
         Path(self.config.download_dir).mkdir(parents= True, exist_ok= True)
@@ -52,7 +58,8 @@ class LANChatApp:
         self.say(f"P2P LAN Messenger started as {self.config.username}")
         self.say(f"Local address: {self.local_ip}:{self.config.tcp_port}")
         self.say("Type /help to see commands.")
-    # hàm chạy chương trình chính
+
+    # hàm chạy chương trình chính (CLI)
     def run(self):
         self.start()
         session = PromptSession()
@@ -70,30 +77,52 @@ class LANChatApp:
                         self.say(f"[!] Internal error: {exc!r}") # !r: in kèm thêm ''
         finally:
             self.shutdown() # giao việc cho shutdown xử lí
-    #hàm xử lí callback _on_peer_event
+
+    # hàm chạy chương trình giao diện (GUI)
+    def run_gui(self):
+        from PyQt6.QtWidgets import QApplication
+        from .ui import LanChatUI
+
+        self.start()
+        qt_app = QApplication(sys.argv)
+        self.ui = LanChatUI(self)
+        self.ui.show()
+        sys.exit(qt_app.exec())
+
+    # hàm xử lí callback _on_peer_event
     def _on_peer_event(self, event, peer):
         """Cập nhật mỗi khi dùng /list, để tránh bị in lại nhiều lần mỗi khi nhận HELLO."""
+        if self.ui:
+            self.ui.sig_peer_event.emit(event, peer)
         if event == "online":
             self.say(f"[*] {peer['name']} is online ({peer['ip']}:{peer['tcp_port']})")
         elif event == "offline":
             self.say(f"[-] {peer['name']} is offline")
+
     # hàm xử lí callback _on_message
     def _on_message(self, connection: PeerConnection, message: str):
         key = connection.key
-        self.chats.add(key, "in", message, unread= (key != self.current_peer_key)) # thêm lịch sử trò chuyện
-        if key == self.current_peer_key: # tin nhắn từ người đang chat chung
+        is_unread = (key != self.current_peer_key)
+        self.chats.add(key, "in", message, unread= is_unread) # thêm lịch sử trò chuyện
+        count = self.chats.unread_count(key)
+        if self.ui:
+            self.ui.sig_message_received.emit(key, connection.peer["name"], message, count)
+        if not is_unread: # tin nhắn từ người đang chat chung
             self.say(f"[{connection.peer['name']}] {message}")
         else: # tin nhắn đến từ người khác
-            count = self.chats.unread_count(key)
             self.say(f"[*] New message from {connection.peer['name']} ({count} unread)")
+
     # hàm xử lí callback _on_connection_closed
     def _on_connection_closed(self, connection, reason, already_closing):
         removed = self.connections.remove(connection)
         if removed:
             if self.current_peer_key == connection.key:
                 self.current_peer_key = None # peer rời chat
+            if self.ui:
+                self.ui.sig_connection_closed.emit(connection.key, str(reason))
             if not already_closing: # đã đóng chat
                 self.say(f"[*] Chat with {connection.peer['name']} closed: {reason}")
+
     # hàm xử lí callback _connect_to_peer
     def _connect_to_peer(self, peer):
         key = (peer["ip"], peer["tcp_port"])
@@ -116,6 +145,42 @@ class LANChatApp:
             self.say(f"[*] Connected to {peer['name']}")
             return connection
         return self.connections.get(key) # trả lại này nếu đã có connect rồi, đăng kí rồi
+
+    # ================= CÁC HÀM CẦU NỐI CHO GUI =================
+    def select_peer_from_ui(self, peer):
+        try:
+            connection = self._connect_to_peer(peer)
+            if connection is None:
+                return False, "Không thể kết nối"
+            self.current_peer_key = connection.key
+            self.chats.clear_unread(connection.key)
+            return True, self.chats.history(connection.key)
+        except (OSError, ValueError) as exc:
+            return False, str(exc)
+
+    def send_message_from_ui(self, peer_key, text: str):
+        connection = self.connections.get(peer_key)
+        if not connection:
+            return False, "Chưa kết nối với người này"
+        try:
+            connection.send_message(text)
+            self.chats.add(connection.key, "out", text)
+            return True, ""
+        except OSError as exc:
+            return False, str(exc)
+
+    def send_file_from_ui(self, peer_key, file_path: str):
+        connection = self.connections.get(peer_key)
+        if not connection:
+            return
+        peer = connection.peer
+        def _worker():
+            from .file_transfer import FileTransfer
+            FileTransfer(self.config, self.local_ip, self.say).send(peer, file_path)
+            if self.ui:
+                self.ui.sig_status_notice.emit(f"Đã gửi xong file tới {peer['name']}")
+        threading.Thread(target=_worker, daemon=True).start()
+
     # hàm xử lí input
     def _handle_input(self, line: str):
         if not line:
@@ -136,6 +201,7 @@ class LANChatApp:
             self.chats.add(connection.key, "out", line)
         except (OSError) as exc:
             self.say(f"[!] Could not send message: {exc}")
+
     # hàm xử lí command
     def _handle_command(self, line: str):
         parts = line.split(maxsplit= 1)
@@ -166,6 +232,7 @@ class LANChatApp:
             self.quit() # giao việc cho quit
         else:
             self.say("[!] Unknown command. Type /help.")
+
     def _list_peers(self):
         peers = sorted(self.peers.snapshot(), key= lambda p: (p["name"].casefold(), p["ip"]))
         if not peers:
@@ -178,6 +245,7 @@ class LANChatApp:
                 f"  {index}. {peer['name']:<16} {peer['ip']}:{peer['tcp_port']} "
                 f"{peer['status']:<7} [{connected}]"
             )
+
     def _chat(self, query):
         if not query: # chưa nhập tên ng muốn chat
             self.say("Usage: /chat <name|number>")
@@ -199,6 +267,7 @@ class LANChatApp:
                 self.say(f"[{label}] {message}")
         except (OSError, ValueError) as exc:
             self.say(f"[!] Could not connect to {peer['name']}: {exc}")
+
     def _leave(self):
         if self.current_peer_key is None:
             self.say("[*] No active chat.")
@@ -209,6 +278,7 @@ class LANChatApp:
             connection.close(send_bye= True)
             self.connections.remove(connection)
             self.say(f"[*] Left chat with {connection.peer['name']}.")
+
     def _send_file(self, argument):
         if not argument:
             self.say("Usage: /send <file-path>")
@@ -223,20 +293,24 @@ class LANChatApp:
         peer = connection.peer
         from .file_transfer import FileTransfer
         FileTransfer(self.config, self.local_ip, self.say).send(peer, argument)
+
     def _set_status(self, status):
         if status not in ("online", "away"):
             self.say("Usage: /status online|away")
             return
         self.discovery.set_status(status)
         self.say(f"[*] Status changed to {status}.")
+
     def quit(self):
         self._stop.set()
+
     def shutdown(self):
         self._stop.set()
         self.discovery.stop()
         self.tcp_server.stop()
         self.connections.close_all()
         self.say("[*] LAN Chat stopped.")
+
 def main():
     parser = argparse.ArgumentParser(description="LAN peer-to-peer chat and file sharing.")
     parser.add_argument("--name", required=True, help="Your display name on the LAN.")
@@ -254,12 +328,6 @@ def main():
         download_dir=args.downloads,
     )
     try:
-        LANChatApp(config).run()
+        LANChatApp(config).run_gui()
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Startup failed: {exc}")
-
-
-
-
-            
-        
