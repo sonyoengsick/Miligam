@@ -16,6 +16,7 @@ from .peer_manager import PeerManager
 from .protocol import send_frame
 from .tcp_server import TCPServer
 
+# [THÊM] Chuỗi đánh dấu ngầm (Control marker) dùng để báo "Đã xem" qua kênh chat TCP mà không cần đổi giao thức protocol.py
 SEEN_MARKER = "\x00SEEN\x00"
 
 # Hàm xác định địa chỉ IPv4 của máy khi ra mạng
@@ -44,7 +45,12 @@ class LANChatApp:
         self._screen_lock = threading.Lock()
         self._stop = threading.Event()
         self.discovery = DiscoveryService(config, self.peers, self.local_ip, self._on_peer_event, self.say)
-        self.tcp_server = TCPServer(config, self.local_ip, self.connections, self._on_message, self._on_connection_closed, self.say)
+        # [SỬA] Truyền thêm callback self._on_file_received vào TCPServer để nhận thông báo khi tải xong file từ peer
+        self.tcp_server = TCPServer(
+            config, self.local_ip, self.connections,
+            self._on_message, self._on_connection_closed, self.say,
+            on_file_received = self._on_file_received
+        )
 
     # hàm in ra tin nhắn ngay lập tức
     def say(self, message: str):
@@ -66,7 +72,7 @@ class LANChatApp:
         self.start()
         session = PromptSession()
         try:
-            with patch_stdout(): # vẽ lại input đang nhập
+            with patch_stdout():
                 while not self._stop.is_set():
                     try:
                         line = session.prompt("> ")
@@ -74,11 +80,11 @@ class LANChatApp:
                         self.quit()
                         break
                     try:
-                        self._handle_input(line.strip()) # giao việc cho _handle_input xử lí
+                        self._handle_input(line.strip())
                     except Exception as exc:
-                        self.say(f"[!] Internal error: {exc!r}") # !r: in kèm thêm ''
+                        self.say(f"[!] Internal error: {exc!r}")
         finally:
-            self.shutdown() # giao việc cho shutdown xử lí
+            self.shutdown()
 
     # hàm chạy chương trình giao diện (GUI)
     def run_gui(self):
@@ -104,7 +110,7 @@ class LANChatApp:
     # hàm xử lí callback _on_message
     def _on_message(self, connection: PeerConnection, message: str):
         key = connection.key
-        # Bắt tín hiệu "Đã xem" từ máy bên kia, ko lưu vào lịch sử chat
+        # [THÊM] Nếu nhận được gói đánh dấu SEEN_MARKER thì chỉ báo "Đã xem" lên UI, không lưu vào lịch sử chat
         if message == SEEN_MARKER:
             if self.ui:
                 self.ui.sig_peer_seen.emit(key, connection.peer["name"])
@@ -117,12 +123,41 @@ class LANChatApp:
             self.ui.sig_message_received.emit(key, connection.peer["name"], message, count)
         if not is_unread: # tin nhắn từ người đang chat chung
             self.say(f"[{connection.peer['name']}] {message}")
+            # [THÊM] Đang mở sẵn khung chat với người gửi -> tự gửi ngược SEEN_MARKER để bên kia hiện "Đã xem"
             try:
                 connection.send_message(SEEN_MARKER)
             except OSError:
                 pass
         else: # tin nhắn đến từ người khác
             self.say(f"[*] New message from {connection.peer['name']} ({count} unread)")
+
+    # [THÊM] Callback được gọi từ FileTransfer khi nhận xong file từ máy khác -> lưu vào ChatManager và đẩy lên khung chat UI
+    def _on_file_received(self, peer: dict, saved_path: Path, size: int):
+        key = (peer["ip"], peer["tcp_port"])
+        # Đổi kích thước byte sang KB/MB cho dễ đọc
+        if size >= 1024 * 1024:
+            size_str = f"{size / (1024 * 1024):.1f} MB"
+        elif size >= 1024:
+            size_str = f"{size / 1024:.1f} KB"
+        else:
+            size_str = f"{size} B"
+
+        text = f"📁 Đã nhận file: {saved_path.name} ({size_str})\nLưu tại: {saved_path}"
+        is_unread = (key != self.current_peer_key)
+        self.chats.add(key, "in", text, unread= is_unread)
+        count = self.chats.unread_count(key)
+
+        if self.ui:
+            self.ui.sig_message_received.emit(key, peer["name"], text, count)
+
+        # Nếu người nhận đang mở sẵn khung chat thì báo "Đã xem" ngược lại luôn
+        if not is_unread:
+            conn = self.connections.get(key)
+            if conn:
+                try:
+                    conn.send_message(SEEN_MARKER)
+                except OSError:
+                    pass
 
     # hàm xử lí callback _on_connection_closed
     def _on_connection_closed(self, connection, reason, already_closing):
@@ -139,7 +174,7 @@ class LANChatApp:
     def _connect_to_peer(self, peer):
         key = (peer["ip"], peer["tcp_port"])
         existing = self.connections.get(key)
-        if existing: # kiểm xem peer đã có connect chưa
+        if existing:
             return existing
         sock = socket.create_connection((peer["ip"], peer["tcp_port"]), timeout= 8)
         sock.settimeout(None)
@@ -152,11 +187,11 @@ class LANChatApp:
             "peer_id": peer_id,
         })
         connection = PeerConnection(sock, peer, peer_id, self._on_message, self._on_connection_closed)
-        if self.connections.register(connection): # đã đăng kí thì chat
+        if self.connections.register(connection):
             connection.start()
             self.say(f"[*] Connected to {peer['name']}")
             return connection
-        return self.connections.get(key) # trả lại này nếu đã có connect rồi, đăng kí rồi
+        return self.connections.get(key)
 
     # ================= CÁC HÀM CẦU NỐI CHO GUI =================
     def select_peer_from_ui(self, peer):
@@ -166,7 +201,7 @@ class LANChatApp:
                 return False, "Không thể kết nối"
             self.current_peer_key = connection.key
             self.chats.clear_unread(connection.key)
-            # Báo cho máy bên kia biết mình vừa mở xem tin nhắn
+            # [THÊM] Khi user bấm mở khung chat -> gửi SEEN_MARKER báo cho đối phương biết đã xem tin
             try:
                 connection.send_message(SEEN_MARKER)
             except OSError:
@@ -186,6 +221,7 @@ class LANChatApp:
         except OSError as exc:
             return False, str(exc)
 
+    # [SỬA] Gắn trực tiếp callback on_progress và on_complete vào FileTransfer.send() để cập nhật thanh % thời gian thực
     def send_file_from_ui(self, peer_key, file_path: str):
         connection = self.connections.get(peer_key)
         if not connection:
@@ -193,25 +229,28 @@ class LANChatApp:
         peer = connection.peer
         file_name = Path(file_path).name
 
-        def _worker():
-            try:
-                from .file_transfer import FileTransfer
-                FileTransfer(self.config, self.local_ip, self.say).send(peer, file_path)
-                self.chats.add(peer_key, "out", f"✅ Đã gửi file: {file_name}")
-                if self.ui:
-                    self.ui.sig_file_sent.emit(peer_key, file_name, True, "")
-            except Exception as exc:
-                if self.ui:
-                    self.ui.sig_file_sent.emit(peer_key, file_name, False, str(exc))
+        def _on_progress(percent: int):
+            if self.ui:
+                self.ui.sig_file_progress.emit(peer_key, file_name, percent)
 
-        threading.Thread(target=_worker, daemon=True).start()
+        def _on_complete(success: bool, err: str):
+            if success:
+                self.chats.add(peer_key, "out", f"✅ Đã gửi file: {file_name} (100%)")
+            if self.ui:
+                self.ui.sig_file_sent.emit(peer_key, file_name, success, err)
+
+        from .file_transfer import FileTransfer
+        # Không cần tạo thread bọc ngoài nữa vì bản thân FileTransfer.send() đã tự tạo thread daemon gửi file
+        FileTransfer(self.config, self.local_ip, self.say).send(
+            peer, file_path, on_progress= _on_progress, on_complete= _on_complete
+        )
 
     # hàm xử lí input
     def _handle_input(self, line: str):
         if not line:
             return
         if line.startswith("/"):
-            self._handle_command(line) # bàn giao việc cho _handle_command nếu input bắt đầu bằng '/'
+            self._handle_command(line)
             return
         if self.current_peer_key is None:
             self.say("[!] Open a chat first with /chat <name|number>.")
@@ -244,17 +283,17 @@ class LANChatApp:
                 "  /quit                 Exit"
             )
         elif command == "/list":
-            self._list_peers() # giao việc cho _list_peers
+            self._list_peers()
         elif command == "/chat":
-            self._chat(argument) # giao việc cho _chat
+            self._chat(argument)
         elif command == "/leave":
-            self._leave() # giao việc cho _leave
+            self._leave()
         elif command == "/send":
-            self._send_file(argument) # giao việc cho _send_file
+            self._send_file(argument)
         elif command == "/status":
-            self._set_status(argument) # giao việc cho _set_status
+            self._set_status(argument)
         elif command == "/quit":
-            self.quit() # giao việc cho quit
+            self.quit()
         else:
             self.say("[!] Unknown command. Type /help.")
 
@@ -272,11 +311,11 @@ class LANChatApp:
             )
 
     def _chat(self, query):
-        if not query: # chưa nhập tên ng muốn chat
+        if not query:
             self.say("Usage: /chat <name|number>")
             return
         peer = self.peers.find(query)
-        if not peer: # kiếm ko thấy người muốn chat
+        if not peer:
             self.say("[!] Peer not found or name is ambiguous. Use /list and select its number.")
             return
         try:
