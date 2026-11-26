@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QLabel, QPushButton,
     QScrollArea, QFrame, QFileDialog, QGraphicsDropShadowEffect,
-    QSizePolicy, QStackedWidget, QProgressBar  # [THÊM] QProgressBar để vẽ thanh % gửi file
+    QSizePolicy, QStackedWidget, QProgressBar
 )
 from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPainter, QPixmap, QIcon, QLinearGradient, QPen
@@ -113,7 +113,6 @@ def setup_autohide_scrollbar(widget):
 
 class AvatarWidget(QLabel):
     """Avatar tròn có nền gradient, vẽ sắc nét High-DPI và hỗ trợ chấm xanh (online) / chấm đỏ (offline)."""
-    # [SỬA] Đổi tham số online_dot thành dot_state ("online" = xanh, "offline" = đỏ, None = ẩn chấm)
     def __init__(self, text, size=42, dot_state=None, white_border=False):
         super().__init__()
         self.setFixedSize(size, size)
@@ -148,7 +147,6 @@ class AvatarWidget(QLabel):
         painter.setFont(font)
         painter.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, (text[:1] or "?").upper())
 
-        # [SỬA] Vẽ chấm xanh khi online, chấm đỏ khi offline để nhìn phát biết ngay trạng thái user
         if dot_state in ("online", "offline"):
             dot_size = max(10, int(size * 0.28))
             dot_color = "#2ECC71" if dot_state == "online" else "#EF4444"
@@ -214,7 +212,6 @@ class ChatListItemWidget(QWidget):
         text_layout.addLayout(bottom_row)
         layout.addLayout(text_layout)
 
-    # [SỬA] Đổi chấm trạng thái trên avatar giữa xanh (online) và đỏ (offline)
     def set_online(self, is_online: bool):
         self.avatar.set_avatar(self.name, size=44, dot_state="online" if is_online else "offline")
 
@@ -302,8 +299,8 @@ class MessageBubbleWidget(QWidget):
             outer.addStretch()
 
 
-# [THÊM] Widget bong bóng riêng cho việc gửi file, tích hợp thanh QProgressBar hiển thị 0% -> 100% và trạng thái "Đã gửi"
 class FileProgressBubbleWidget(QWidget):
+    """Widget bong bóng riêng cho việc gửi file, tích hợp thanh QProgressBar 0% -> 100%."""
     def __init__(self, file_name: str, time_str: str):
         super().__init__()
         self.setStyleSheet("background: transparent;")
@@ -331,7 +328,6 @@ class FileProgressBubbleWidget(QWidget):
         self.title_lbl.setStyleSheet("color: #FFFFFF; background: transparent; border: none;")
         b_layout.addWidget(self.title_lbl)
 
-        # Thanh phần trăm tiến độ gửi file
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -383,9 +379,9 @@ class LanChatUI(QMainWindow):
     sig_message_received = pyqtSignal(object, str, str, int)
     sig_connection_closed = pyqtSignal(object, str)
     sig_status_notice = pyqtSignal(str)
-    sig_file_progress = pyqtSignal(object, str, int)          # [THÊM] Tín hiệu cập nhật % gửi file từ thread socket
-    sig_file_sent = pyqtSignal(object, str, bool, str)        # [THÊM] Tín hiệu báo gửi file xong/lỗi
-    sig_peer_seen = pyqtSignal(object, str)                   # [THÊM] Tín hiệu báo đối phương đã xem tin nhắn
+    sig_file_progress = pyqtSignal(object, str, int)
+    sig_file_sent = pyqtSignal(object, str, bool, str)
+    sig_peer_seen = pyqtSignal(object, str)
 
     def __init__(self, app_controller):
         super().__init__()
@@ -395,9 +391,9 @@ class LanChatUI(QMainWindow):
         self.setFont(QFont(FONT_FAMILY, 10))
 
         self.current_peer_key = None
-        self.peer_items = {}             # {key: (QListWidgetItem, ChatListItemWidget, peer_dict)}
-        self.pending_file_bubbles = {}   # [THÊM] Lưu bong bóng thanh % đang gửi để cập nhật theo từng chunk
-        self.seen_widget = None          # [THÊM] Giữ widget dòng chữ "✓ Đã xem" để dời xuống dưới cùng khi có tin mới
+        self.peer_items = {}
+        self.pending_file_bubbles = {}
+        self.seen_widget = None
 
         self._init_ui()
         self._connect_signals()
@@ -738,9 +734,9 @@ class LanChatUI(QMainWindow):
         self.sig_message_received.connect(self._on_message_received_ui)
         self.sig_connection_closed.connect(self._on_connection_closed_ui)
         self.sig_status_notice.connect(self._on_status_notice_ui)
-        self.sig_file_progress.connect(self._on_file_progress_ui)   # [THÊM]
-        self.sig_file_sent.connect(self._on_file_sent_ui)           # [THÊM]
-        self.sig_peer_seen.connect(self._on_peer_seen_ui)           # [THÊM]
+        self.sig_file_progress.connect(self._on_file_progress_ui)
+        self.sig_file_sent.connect(self._on_file_sent_ui)
+        self.sig_peer_seen.connect(self._on_peer_seen_ui)
 
     def _load_initial_peers(self):
         for peer in self.app.peers.snapshot():
@@ -750,13 +746,24 @@ class LanChatUI(QMainWindow):
         count = sum(1 for _, _, p in self.peer_items.values() if p.get("online", True))
         self.online_count_lbl.setText(f"Online: {count}")
 
-    # [THÊM] Hàm dùng chung để đánh dấu 1 user đã offline ngay lập tức (đổi chấm đỏ ở cả list lẫn header)
+    def _mark_peer_online(self, key):
+        if key in self.peer_items:
+            _, widget, peer = self.peer_items[key]
+            if not peer.get("online", True):
+                peer["online"] = True
+                widget.set_online(True)
+                self._update_online_count()
+                if self.current_peer_key == key:
+                    self.header_avatar.set_avatar(peer["name"], size=44, dot_state="online")
+                    self.header_status.setText(f"● Đang hoạt động • {peer['ip']}:{peer['tcp_port']}")
+                    self.header_status.setStyleSheet("color: #10B981; background: transparent;")
+
     def _mark_peer_offline(self, key):
         now_str = datetime.now().strftime("%H:%M")
         if key in self.peer_items:
             _, widget, old_peer = self.peer_items[key]
             old_peer["online"] = False
-            widget.set_online(False)  # Đổi sang chấm đỏ ngay lập tức
+            widget.set_online(False)
             widget.msg_label.setText("Đã ngắt kết nối")
             widget.time_label.setText(now_str)
             self._update_online_count()
@@ -775,7 +782,6 @@ class LanChatUI(QMainWindow):
         if event == "online":
             peer["online"] = True
 
-            # Nếu user cũ vừa đăng nhập lại với cùng tên, tái sử dụng lại đúng ô cũ trong list
             if key not in self.peer_items:
                 for old_key, (old_item, old_widget, old_peer) in list(self.peer_items.items()):
                     if not old_peer.get("online", True) and old_peer["name"].casefold() == peer["name"].casefold():
@@ -789,7 +795,7 @@ class LanChatUI(QMainWindow):
                 item, widget, _ = self.peer_items[key]
                 widget.name = peer["name"]
                 widget.name_label.setText(peer["name"])
-                widget.set_online(True)  # Bật lại chấm xanh
+                widget.set_online(True)
                 widget.msg_label.setText(f"Đang hoạt động • {peer['ip']}")
                 widget.time_label.setText(now_str)
                 self.peer_items[key] = (item, widget, peer)
@@ -815,10 +821,11 @@ class LanChatUI(QMainWindow):
             self._mark_peer_offline(key)
 
     def _on_message_received_ui(self, peer_key, sender_name: str, text: str, unread_count: int):
+        self._mark_peer_online(peer_key)
+
         now_str = datetime.now().strftime("%H:%M")
         if peer_key in self.peer_items:
             _, widget, _ = self.peer_items[peer_key]
-            # Lấy dòng đầu tiên làm preview trên danh sách bên trái cho gọn
             widget.msg_label.setText(text.splitlines()[0])
             widget.time_label.setText(now_str)
             widget.set_unread(unread_count if peer_key != self.current_peer_key else 0)
@@ -826,20 +833,19 @@ class LanChatUI(QMainWindow):
         if peer_key == self.current_peer_key:
             self._append_message(sender_name, text, is_me=False, time_str=now_str)
 
-    # [SỬA] Khi kết nối TCP bị đóng (user bên kia thoát app), đổi sang chấm đỏ ngay lập tức không chờ UDP timeout
     def _on_connection_closed_ui(self, peer_key, reason: str):
+        if self.app.connections.get(peer_key) is not None:
+            return
         self._mark_peer_offline(peer_key)
 
     def _on_status_notice_ui(self, text: str):
         self.header_status.setText(text)
 
-    # [THÊM] Cập nhật thanh % đang gửi file (0% -> 100%) trên bong bóng chat
     def _on_file_progress_ui(self, peer_key, file_name: str, percent: int):
         bubble = self.pending_file_bubbles.get((peer_key, file_name))
         if bubble:
             bubble.set_progress(percent)
 
-    # [THÊM] Khi gửi file hoàn tất -> đổi chữ thành "100% • Đã gửi" và cập nhật dòng preview bên trái
     def _on_file_sent_ui(self, peer_key, file_name: str, success: bool, err: str):
         bubble = self.pending_file_bubbles.pop((peer_key, file_name), None)
         if bubble:
@@ -854,7 +860,6 @@ class LanChatUI(QMainWindow):
             self.seen_widget.deleteLater()
             self.seen_widget = None
 
-    # [SỬA] Thay icon avatar nhỏ bằng dòng chữ "✓ Đã xem" gọn gàng ở dưới bong bóng tin nhắn
     def _on_peer_seen_ui(self, peer_key, peer_name: str):
         if peer_key != self.current_peer_key or self.msg_layout.count() == 0:
             return
@@ -916,23 +921,22 @@ class LanChatUI(QMainWindow):
         if not text or self.current_peer_key is None:
             return
 
-        if self.current_peer_key in self.peer_items:
-            _, _, peer = self.peer_items[self.current_peer_key]
-            if not peer.get("online", True):
-                self.header_status.setText("● Người này đã ngắt kết nối, chờ họ online lại để gửi")
-                self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
-                return
-
-        self.msg_input.clear()
         ok, err = self.app.send_message_from_ui(self.current_peer_key, text)
-
         if not ok and self.current_peer_key in self.peer_items:
             _, _, peer = self.peer_items[self.current_peer_key]
             reconn_ok, _ = self.app.select_peer_from_ui(peer)
             if reconn_ok:
+                self._mark_peer_online(self.current_peer_key)
                 ok, err = self.app.send_message_from_ui(self.current_peer_key, text)
+            else:
+                self._mark_peer_offline(self.current_peer_key)
+                self.header_status.setText("● Người này đã ngắt kết nối, chờ họ online lại để gửi")
+                self.header_status.setStyleSheet("color: #EF4444; background: transparent;")
+                return
 
         if ok:
+            self.msg_input.clear()
+            self._mark_peer_online(self.current_peer_key)
             now_str = datetime.now().strftime("%H:%M")
             self._append_message(self.app.config.username, text, is_me=True, time_str=now_str)
             if self.current_peer_key in self.peer_items:
@@ -942,7 +946,6 @@ class LanChatUI(QMainWindow):
         else:
             self.header_status.setText(f"Gửi lỗi: {err}")
 
-    # [SỬA] Tạo bong bóng FileProgressBubbleWidget (có thanh %) rồi mới gọi app.send_file_from_ui
     def _handle_attach_file(self):
         if self.current_peer_key is None:
             return

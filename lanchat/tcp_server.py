@@ -83,7 +83,7 @@ class TCPServer:
                 "status": "online",
                 "peer_id": str(hello.get("peer_id", f"{addr[0]}"))
             }
-            if not 1 <= port <= 65535:
+            if not 1024 <= port <= 49121:
                 raise ValueError("Invalid peer TCP port.")
             if kind == "file":
                 sock.settimeout(300.0) # sau 5p không nhận được dữ liệu thì dừng
